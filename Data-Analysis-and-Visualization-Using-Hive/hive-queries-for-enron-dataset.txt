@@ -1,0 +1,142 @@
+CREATE ENRON TABLE
+create table enron(eid string,timestamp string,sender string,receiver array<string>,cc array<string>,subject string,context string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/enron';
+load data inpath 's3://hivepartitioned/input/enron.tab' overwrite into table enron;
+
+
+
+EXPLODDED ENRON
+create table explodedenron(eid string,timestamp string,year int,month string,sender string,receiver array<string>,cc array<string>,subject string,context string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/explodedenron';
+insert overwrite table explodedenron select enron.eid,enron.timestamp,cast(regexp_extract(enron.timestamp,'(.{3}),\\s(\\d{1,2})\\s(.{3})\\s(\\d{4})\\s(\\d{2}):(\\d{2}):(\\d{2})\\s-(\\d{4})\\s.*',4) as int),regexp_extract(enron.timestamp,'(.{3}),\\s(\\d{1,2})\\s(.{3})\\s(\\d{4})\\s(\\d{2}):(\\d{2}):(\\d{2})\\s-(\\d{4})\\s.*',3),enron.sender,enron.receiver,enron.cc,enron.subject,enron.context from enron;
+
+
+
+UNCLEAN DATASET
+create table yearlymailcountunclean(year int,counter int) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/yearlymailcountunclean';
+insert overwrite table yearlymailcountunclean select explodedenron.year as year,count(explodedenron.year) as counter from explodedenron group by explodedenron.year order by year;
+select * from yearlymailcountunclean;
+
+
+
+UNCLEAN DATASET COUNT INTERNAL VS EXTERNAL COUNT(coutn entries from internalmails and externalmails table) - NO NEED TO CREATE TABLE,JUST COUNT
+create table internalmails(eid string,timestamp string,year int,month string,sender string,receiver array<string>,cc array<string>,subject string,context string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/internalmails';
+insert overwrite table internalmails select explodedenron.* from explodedenron where explodedenron.sender like '%@enron.com'; 
+select count(*) from internalmails;
+ANS : 409095
+create table externalmails(eid string,timestamp string,year int,month string,sender string,receiver array<string>,cc array<string>,subject string,context string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/externalmails';
+insert overwrite table externalmails select explodedenron.* from explodedenron where explodedenron.sender not like '%@enron.com';
+select count(*) from externalmails;
+ANS : 86482
+
+
+
+
+MONTH TO NUM 
+create table monthtonumtable(month string,monthnum int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/monthtonumtable';
+load data inpath 's3://hivepartitioned/input/monthtonumtable' overwrite into table monthtonumtable;
+
+
+
+
+CONVERT MONTH TO MONTHNUM
+create table explodedenronjoined(eid string,timestamp string,year int,month string,sender string,receiver array<string>,cc array<string>,subject string,context string,monthnum int,yearmonth string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/explodedenronjoined';
+insert overwrite table explodedenronjoined select e.*,m.monthnum as monthnum,concat(cast(e.year as string) , cast(m.monthnum as string)) as yearmonth from monthtonumtable m join explodedenron e on(lower(e.month) = lower(m.month));
+drop table explodedenron;//not necessary as data moved to explodedenronjoined
+select count(*) from explodedenronjoined;
+ANS : 495576
+select distinct yearmonth from explodedenronjoined;
+
+
+
+
+CLEANING
+create table explodedenroncleaninternalmails(eid string,timestamp string,year int,month string,sender string,receiver array<string>,cc array<string>,subject string,context string,monthnum int,yearmonth string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/explodedenroncleaninternalmails';
+create table yearsformails(year int) row format delimited stored as textfile location 's3://hivepartitioned/tables/yearsformails';
+insert overwrite table yearsformails select distinct explodedenronjoined.year from explodedenronjoined order by year;
+insert overwrite table explodedenroncleaninternalmails select explodedenronjoined.* from explodedenronjoined where explodedenronjoined.year >= 1985 and explodedenronjoined.year <= 2002 and explodedenronjoined.sender like '%@enron.com' order by yearmonth;
+select count(*) from explodedenroncleaninternalmails;
+ANS : 408726
+
+
+
+
+TOP SENDERS FOR INTERNAL MAILS
+create table cleaninternalmailstopsenders(sender string,counter int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/cleaninternalmailstopsenders';
+insert into table cleaninternalmailstopsenders select explodedenroncleaninternalmails.sender , count(explodedenroncleaninternalmails.sender) as counter from explodedenroncleaninternalmails group by explodedenroncleaninternalmails.sender order by counter desc;
+
+
+
+
+EMAIL VARIATION WITH YEARS
+create table yearsforcleanmails(year int,yearmonth string) row format delimited stored as textfile location 's3://hivepartitioned/tables/yearsforcleanmails';
+insert overwrite table yearsforcleanmails select distinct explodedenroncleaninternalmails.yearmonth as yearmonth , explodedenroncleaninternalmails.year as year from explodedenroncleaninternalmails order by yearmonth;
+create table yearlymailvariation(year int,counter int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/yearlymailvariation';
+insert overwrite table yearlymailvariation select explodedenroncleaninternalmails.year , count(explodedenroncleaninternalmails.year) as counter from explodedenroncleaninternalmails group by explodedenroncleaninternalmails.year;
+ANS : 
+1998	160
+1999	9970
+2000	168119
+2001	206405
+2002	24072
+
+
+
+
+GENERAL MONTHLY EMAIL VARIATION
+create table explodedenroncleaninternalmailcount(yearmonth string,counter int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/explodedenroncleaninternalmailcount';
+insert overwrite table explodedenroncleaninternalmailcount select explodedenroncleaninternalmails.yearmonth , count(explodedenroncleaninternalmails.yearmonth) as counter from explodedenroncleaninternalmails group by explodedenroncleaninternalmails.yearmonth;
+
+
+
+
+WORD BAG(SPE) - WORDS:CHEWCO,JEDI(Joint Energy Development Investments),Whitewing,LJM,Raptors
+create table speinternalemails(eid string,timestamp string,year int,month string,sender string,receiver array<string>,cc array<string>,subject string,context string,monthnum int,yearmonth string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/speinternalemails';
+insert overwrite table speinternalemails select explodedenroncleaninternalmails.* from explodedenroncleaninternalmails where locate('chewco',lower(explodedenroncleaninternalmails.context))!=0 or locate('Whitewing',lower(explodedenroncleaninternalmails.context))!=0 or locate('jedi',lower(explodedenroncleaninternalmails.context))!=0 or locate('ljm',lower(explodedenroncleaninternalmails.context))!=0 or locate('raptors',lower(explodedenroncleaninternalmails.context))!=0;
+COUNT : 849
+create table speinternalmailssenders(sender string,counter int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/speinternalmailssenders';
+insert overwrite table speinternalmailssenders select speinternalemails.sender , count(speinternalemails.sender) as counter from speinternalemails group by speinternalemails.sender order by counter desc;
+COUNT : 194
+
+
+
+GOOD GUYS BAD GUYS TABLES
+create table goodguys(name string) row format delimited stored as textfile location 's3://hivepartitioned/tables/goodguys';
+load data inpath 's3://hivepartitioned/input/goodguys' overwrite into table goodguys;
+create table badguys(name string) row format delimited stored as textfile location 's3://hivepartitioned/tables/badguys';
+load data inpath 's3://hivepartitioned/input/badguys' overwrite into table badguys; 
+
+
+
+GOOD GUYS VS BAD GUYS EMAIL VARIATION(some bad guys did not have email data in enron.tab,data not complete,manipulated)
+create table badguysemails(sender string,year int,month string,monthnum int,yearmonth string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/badguysemails';
+insert overwrite table badguysemails select e.sender as sender, e.year as year, e.month as month, e.monthnum as monthnum, e.yearmonth as yearmonth from explodedenroncleaninternalmails e join badguys b on(e.sender = b.name) order by yearmonth;
+create table badguysemailcount(yearmonth string,counter int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/badguysemailcount';
+insert overwrite table badguysemailcount select badguysemails.yearmonth , count(badguysemails.yearmonth) as counter from badguysemails group by badguysemails.yearmonth order by yearmonth;
+create table goodguysemails(sender string,year int,month string,monthnum int,yearmonth string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/goodguysemails';
+insert overwrite table goodguysemails select e.sender as sender, e.year as year, e.month as month, e.monthnum as monthnum,e.yearmonth as yearmonth from explodedenroncleaninternalmails e join goodguys g on(e.sender = g.name) order by yearmonth;
+create table goodguysemailcount(yearmonth string,counter int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/goodguysemailcount';
+insert overwrite table goodguysemailcount select goodguysemails.yearmonth , count(goodguysemails.yearmonth) as counter from goodguysemails group by goodguysemails.yearmonth order by yearmonth
+
+
+
+
+EXTERNAL MAIL VARIATION(THRESHOLD OF [RECEIPIENTS+CC] < 10 , SPAM OTHERWISE)(wrong data or lots of spams)
+SENDERS
+create table externalemailssendercount(sender string,counter int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/externalemailssendercount';
+insert overwrite table externalemailssendercount select explodedenronjoined.sender as sender , count(explodedenronjoined.sender) as counter from explodedenronjoined where explodedenronjoined.sender not like '%@enron.com' group by explodedenronjoined.sender order by counter desc;
+select count (*) from externalemailssendercount;
+TOTAL COUNT : 13412
+
+
+
+
+
+SENTIMENT ANALYSIS
+NEGATIVE
+create table negativewords(word string) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/negativewords';
+load data inpath 's3://hivepartitioned/input/Negative_updated_lower.txt' overwrite into table negativewords;
+create table negativeemails(eid string,timestamp string,year int,month string,sender string,receiver array<string>,cc array<string>,subject string,context string,monthnum int,yearmonth string,word string) row format delimited fields terminated by '\t' collection items terminated by ',' stored as textfile location 's3://hivepartitioned/tables/negativeemails';
+insert overwrite table negativeemails select e.*,n.word from negativewords n join explodedenroncleaninternalmails e on(true) where locate(n.word,lower(e.context))!=0;
+create table negativeemaildistinct(eid string,yearmonth string,year int,monthnum int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/negativeemaildistinct';
+insert overwrite table negativeemaildistinct select distinct negativeemails.eid as eid , negativeemails.yearmonth as yearmonth , negativeemails.year as year , negativeemails.monthnum as monthnum from negativeemails;  
+create table negativeemailcount(yearmonth string,counter int) row format delimited fields terminated by '\t' stored as textfile location 's3://hivepartitioned/tables/negativeemailcount';
+insert overwrite table negativeemailcount select negativeemaildistinct.yearmonth , count(negativeemaildistinct.yearmonth) as counter from negativeemaildistinct group by negativeemaildistinct.yearmonth order by counter;
